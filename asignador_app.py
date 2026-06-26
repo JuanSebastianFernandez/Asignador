@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import base64
+import io
+import json
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +24,103 @@ from asignador_core import (
 
 
 RUTA_PROFESIONALES = Path(__file__).with_name("profesionales.csv")
+GITHUB_API = "https://api.github.com"
+
+
+def _leer_secretos_github() -> dict[str, str]:
+    try:
+        github = st.secrets.get("github", {})
+        token = github.get("token", st.secrets.get("GITHUB_TOKEN", ""))
+        repo = github.get(
+            "repo",
+            st.secrets.get("GITHUB_REPO", "JuanSebastianFernandez/Asignador"),
+        )
+        branch = github.get("branch", st.secrets.get("GITHUB_BRANCH", "main"))
+        path = github.get(
+            "path",
+            st.secrets.get("GITHUB_PROFESIONALES_PATH", "profesionales.csv"),
+        )
+    except Exception:
+        return {}
+
+    config = {
+        "token": str(token).strip(),
+        "repo": str(repo).strip(),
+        "branch": str(branch).strip(),
+        "path": str(path).strip(),
+    }
+    return config if config["token"] and config["repo"] and config["path"] else {}
+
+
+def _github_request(
+    config: dict[str, str],
+    method: str,
+    url: str,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {config['token']}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "asignador-streamlit",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detalle = exc.read().decode("utf-8", errors="ignore")
+        raise ErrorDatos(
+            f"GitHub respondió con error {exc.code}. Detalle: {detalle}"
+        ) from exc
+    except URLError as exc:
+        raise ErrorDatos(f"No fue posible conectar con GitHub: {exc}") from exc
+
+
+def _github_contents_url(config: dict[str, str]) -> str:
+    path = quote(config["path"], safe="/")
+    repo = quote(config["repo"], safe="/")
+    return f"{GITHUB_API}/repos/{repo}/contents/{path}"
+
+
+def cargar_profesionales_github(config: dict[str, str]) -> tuple[pd.DataFrame, str]:
+    url = f"{_github_contents_url(config)}?ref={quote(config['branch'])}"
+    contenido = _github_request(config, "GET", url)
+    codificado = str(contenido.get("content", "")).replace("\n", "")
+    texto_csv = base64.b64decode(codificado).decode("utf-8-sig")
+    df = pd.read_csv(io.StringIO(texto_csv), dtype=str, keep_default_na=False)
+    sha = str(contenido.get("sha", ""))
+    if not sha:
+        raise ErrorDatos("GitHub no devolvió el identificador SHA de profesionales.csv.")
+    return df, sha
+
+
+def guardar_profesionales_github(
+    df: pd.DataFrame,
+    config: dict[str, str],
+    sha_actual: str | None,
+) -> pd.DataFrame:
+    profesionales = guardar_profesionales(df, RUTA_PROFESIONALES)
+    buffer = io.StringIO()
+    profesionales.to_csv(buffer, index=False, encoding="utf-8")
+    contenido = base64.b64encode(buffer.getvalue().encode("utf-8-sig")).decode("ascii")
+
+    payload: dict[str, object] = {
+        "message": "Actualizar profesionales desde Streamlit",
+        "content": contenido,
+        "branch": config["branch"],
+    }
+    if sha_actual:
+        payload["sha"] = sha_actual
+
+    _github_request(config, "PUT", _github_contents_url(config), payload)
+    return profesionales
 
 
 st.set_page_config(
@@ -33,16 +136,47 @@ st.caption(
 
 
 @st.cache_data(show_spinner=False)
-def cargar_tabla_profesionales(ruta: str, marca_tiempo: float) -> pd.DataFrame:
+def cargar_tabla_profesionales_local(ruta: str, marca_tiempo: float) -> pd.DataFrame:
     del marca_tiempo
     return cargar_profesionales(ruta)
 
 
-def obtener_profesionales() -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def cargar_tabla_profesionales_remota(
+    repo: str,
+    branch: str,
+    path: str,
+    token_marker: str,
+) -> tuple[pd.DataFrame, str]:
+    del token_marker
+    config = _leer_secretos_github()
+    if not config:
+        raise ErrorDatos("No hay configuración de GitHub para cargar profesionales.")
+    config.update({"repo": repo, "branch": branch, "path": path})
+    return cargar_profesionales_github(config)
+
+
+def obtener_profesionales() -> tuple[pd.DataFrame, str | None, dict[str, str]]:
+    github_config = _leer_secretos_github()
+    if github_config:
+        df, sha = cargar_tabla_profesionales_remota(
+            github_config["repo"],
+            github_config["branch"],
+            github_config["path"],
+            github_config["token"][-6:],
+        )
+        guardar_profesionales(df, RUTA_PROFESIONALES)
+        return df, sha, github_config
+
     if not RUTA_PROFESIONALES.exists():
-        return cargar_profesionales(RUTA_PROFESIONALES)
-    return cargar_tabla_profesionales(
-        str(RUTA_PROFESIONALES), RUTA_PROFESIONALES.stat().st_mtime
+        return cargar_profesionales(RUTA_PROFESIONALES), None, {}
+    return (
+        cargar_tabla_profesionales_local(
+            str(RUTA_PROFESIONALES),
+            RUTA_PROFESIONALES.stat().st_mtime,
+        ),
+        None,
+        {},
     )
 
 
@@ -74,10 +208,25 @@ with tab_profesionales:
         "`ELIMINAR` y guarde los cambios."
     )
     try:
-        profesionales_actuales = obtener_profesionales()
+        profesionales_actuales, profesionales_sha, github_config = (
+            obtener_profesionales()
+        )
     except ErrorDatos as exc:
         st.error(str(exc))
         profesionales_actuales = pd.DataFrame(columns=["CEDULA", "NOMBRE", "CORREO"])
+        profesionales_sha = None
+        github_config = {}
+
+    if github_config:
+        st.info(
+            "Persistencia activa: los cambios se guardarán en GitHub "
+            f"`{github_config['repo']}/{github_config['path']}`."
+        )
+    else:
+        st.warning(
+            "Persistencia local: en Streamlit Community Cloud los cambios se pueden "
+            "perder al reiniciar. Configure los secretos de GitHub para guardarlos."
+        )
 
     profesionales_editor = profesionales_actuales.copy()
     profesionales_editor.insert(0, "ELIMINAR", False)
@@ -108,8 +257,16 @@ with tab_profesionales:
                 ~profesionales_editados["ELIMINAR"].fillna(False),
                 ["CEDULA", "NOMBRE", "CORREO"],
             ]
-            guardados = guardar_profesionales(para_guardar, RUTA_PROFESIONALES)
-            cargar_tabla_profesionales.clear()
+            if github_config:
+                guardados = guardar_profesionales_github(
+                    para_guardar,
+                    github_config,
+                    profesionales_sha,
+                )
+                cargar_tabla_profesionales_remota.clear()
+            else:
+                guardados = guardar_profesionales(para_guardar, RUTA_PROFESIONALES)
+                cargar_tabla_profesionales_local.clear()
             st.success(f"Se guardaron {len(guardados)} profesionales.")
             st.rerun()
         except ErrorDatos as exc:
@@ -160,7 +317,7 @@ with tab_carga:
         use_container_width=True,
     ):
         try:
-            profesionales = obtener_profesionales()
+            profesionales, _, _ = obtener_profesionales()
             with st.status("Procesando archivos...", expanded=True) as estado:
                 st.write("Leyendo y validando los CSV.")
                 asignador, resumenes, raw_data = procesar_archivos(
