@@ -15,6 +15,7 @@ from asignador_core import (
     ARCHIVOS_OBLIGATORIOS,
     ErrorDatos,
     TIPOS_ARCHIVO,
+    VERSION_LOGICA_PROCESAMIENTO,
     cargar_profesionales,
     exportar_excel,
     guardar_profesionales,
@@ -134,6 +135,10 @@ st.caption(
     "los profesionales y genera el Excel con trazabilidad completa."
 )
 
+if st.session_state.get("version_logica_procesamiento") != VERSION_LOGICA_PROCESAMIENTO:
+    st.session_state.pop("resultado_asignador", None)
+    st.session_state["version_logica_procesamiento"] = VERSION_LOGICA_PROCESAMIENTO
+
 
 @st.cache_data(show_spinner=False)
 def cargar_tabla_profesionales_local(ruta: str, marca_tiempo: float) -> pd.DataFrame:
@@ -195,6 +200,23 @@ def mostrar_resumenes(resumenes: dict[str, pd.DataFrame]) -> None:
         st.dataframe(
             resumenes["elementos_por_user"], hide_index=True, use_container_width=True
         )
+    st.markdown("**Posibles PNC**")
+    st.dataframe(resumenes["posibles_pnc"], hide_index=True, use_container_width=True)
+
+
+def mostrar_detalle_posibles_pnc(asignador: pd.DataFrame) -> None:
+    posibles_pnc = asignador.loc[asignador["POSIBLE_PNC"].eq("Si")].copy()
+    if posibles_pnc.empty:
+        st.info("No se detectaron posibles PNC con la lógica actual.")
+        return
+
+    columnas = ["QR", "FLUJO", "ORIGEN", "ESTADO", "LLEGADA", "USER"]
+    st.markdown("**Detalle de posibles PNC**")
+    st.dataframe(
+        posibles_pnc[columnas],
+        hide_index=True,
+        use_container_width=True,
+    )
 
 
 tab_carga, tab_profesionales = st.tabs(
@@ -347,16 +369,19 @@ with tab_carga:
         asignador = resultado["asignador"]
         sin_asignar = asignador["USER"].fillna("").eq("").sum()
         total_elementos = int(asignador["ELEMENTOS"].sum())
-        metrica_1, metrica_2, metrica_3 = st.columns(3)
+        posibles_pnc = int(asignador["POSIBLE_PNC"].eq("Si").sum())
+        metrica_1, metrica_2, metrica_3, metrica_4 = st.columns(4)
         metrica_1.metric("Casos", f"{len(asignador):,}".replace(",", "."))
         metrica_2.metric("Sin asignar", f"{sin_asignar:,}".replace(",", "."))
         metrica_3.metric(
             "Elementos", f"{total_elementos:,}".replace(",", ".")
         )
+        metrica_4.metric("Posibles PNC", f"{posibles_pnc:,}".replace(",", "."))
 
         st.subheader("Vista previa de Asignador")
         st.dataframe(asignador, hide_index=True, use_container_width=True)
         mostrar_resumenes(resultado["resumenes"])
+        mostrar_detalle_posibles_pnc(asignador)
         st.download_button(
             "Descargar Casos_asigna_generado.xlsx",
             data=resultado["excel"],

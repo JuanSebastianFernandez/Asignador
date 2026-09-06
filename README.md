@@ -45,4 +45,14 @@ se calcula recorriendo las transiciones del caso. Las devoluciones y
 reaperturas reinician la llegada cuando el caso vuelve al dibujante. Cuando no
 se carga, usa la fecha y hora local de Colombia del momento de generación.
 
+Si se carga `exported-logs`, el Asignador también agrega la columna
+`POSIBLE_PNC`. Esta marca queda en `Si` cuando el historial muestra que el caso
+ya había sido entregado (`2.7` en flujo viejo o `drawing_review` en flujo nuevo)
+y luego volvió a una bandeja de asignación (`2.5`/`2.6` o
+`drawing_request`/`assigned_draftsman`). La marca sirve como prefiltro para
+revisión del coordinador; no reemplaza la validación final del PNC.
+Si antes del reingreso aparece una devolución (`2`, `2.6.1` o
+`verify_formats`), el caso no se marca como posible PNC porque esa devolución
+corta el ciclo anterior.
+
 La configuración local permite cargar archivos de hasta 500 MB.

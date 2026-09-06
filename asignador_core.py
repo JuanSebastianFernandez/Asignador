@@ -59,6 +59,7 @@ COLUMNAS_ASIGNADOR = [
     "ESTADO",
     "LLEGADA",
     "USER",
+    "POSIBLE_PNC",
 ]
 
 PROFESIONALES_INICIALES = [
@@ -125,22 +126,25 @@ PROFESIONALES_INICIALES = [
 ]
 
 MAX_FILAS_DATOS_EXCEL = 1_048_575
+VERSION_LOGICA_PROCESAMIENTO = "pnc-v2-devolucion-corta-ciclo"
 
 REGLAS_LLEGADA = {
     "Flujo viejo": {
         "activos": {"2.5", "2.6"},
-        "salidas": {"2", "2.6.1", "2.7"},
+        "devoluciones": {"2", "2.6.1"},
+        "entregas": {"2.7"},
     },
     "Flujo nuevo": {
         "activos": {"drawing_request", "assigned_draftsman"},
-        "salidas": {"verify_formats", "drawing_review"},
+        "devoluciones": {"verify_formats"},
+        "entregas": {"drawing_review"},
     },
 }
 
 ESTADOS_SEGUIDOS_LLEGADA = {
     estado
     for regla in REGLAS_LLEGADA.values()
-    for estado in (*regla["activos"], *regla["salidas"])
+    for estado in (*regla["activos"], *regla["devoluciones"], *regla["entregas"])
 }
 
 RE_CODIGO_ESTADO = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)*)")
@@ -396,7 +400,9 @@ def extraer_codigo_estado(valor: object) -> str:
     if not texto or texto.casefold() == "nan":
         return ""
     coincidencia = RE_CODIGO_ESTADO.match(texto)
-    return coincidencia.group(1) if coincidencia else texto
+    if coincidencia:
+        return coincidencia.group(1)
+    return _texto_sin_tildes(texto).casefold().replace(" ", "_")
 
 
 def _fechas_locales_colombia(valores: pd.Series) -> pd.Series:
@@ -408,14 +414,18 @@ def _fechas_locales_colombia(valores: pd.Series) -> pd.Series:
     return fechas
 
 
-def _resolver_llegada_actual(eventos: pd.DataFrame, flujo: str) -> pd.Timestamp:
-    """Obtiene la llegada más reciente recorriendo devoluciones y reaperturas."""
+def _resolver_ciclo_actual_desde_log(
+    eventos: pd.DataFrame, flujo: str
+) -> tuple[pd.Timestamp, bool]:
+    """Obtiene la llegada vigente y detecta reingresos tras entrega formal."""
     if eventos.empty or flujo not in REGLAS_LLEGADA:
-        return pd.NaT
+        return pd.NaT, False
 
     regla = REGLAS_LLEGADA[flujo]
     activos = regla["activos"]
-    salidas = regla["salidas"]
+    devoluciones = regla["devoluciones"]
+    entregas = regla["entregas"]
+    salidas = devoluciones | entregas
     ordenados = eventos.sort_values(
         ["timestamp", "_row_order"],
         kind="stable",
@@ -423,6 +433,8 @@ def _resolver_llegada_actual(eventos: pd.DataFrame, flujo: str) -> pd.Timestamp:
 
     llegada = pd.NaT
     esperando_reingreso = False
+    posible_pnc = False
+    antecedente_relevante = ""
 
     for evento in ordenados.itertuples(index=False):
         estado_inicial = evento.initial_state_code
@@ -430,23 +442,46 @@ def _resolver_llegada_actual(eventos: pd.DataFrame, flujo: str) -> pd.Timestamp:
 
         if estado_final in salidas:
             esperando_reingreso = True
+            antecedente_relevante = (
+                "entrega" if estado_final in entregas else "devolucion"
+            )
+            if antecedente_relevante == "devolucion":
+                posible_pnc = False
             continue
 
         if estado_final not in activos:
+            if estado_inicial in entregas:
+                antecedente_relevante = "entrega"
+            elif estado_inicial in devoluciones:
+                antecedente_relevante = "devolucion"
+                posible_pnc = False
             continue
 
         es_reingreso = esperando_reingreso or estado_inicial in salidas
         if pd.isna(llegada) or es_reingreso:
             llegada = pd.Timestamp(evento.timestamp)
+            if estado_inicial in entregas:
+                antecedente_relevante = "entrega"
+            elif estado_inicial in devoluciones:
+                antecedente_relevante = "devolucion"
+            posible_pnc = antecedente_relevante == "entrega"
         esperando_reingreso = False
 
-    return llegada
+    return llegada, posible_pnc
 
 
 def calcular_llegadas_desde_logs(
     asignador: pd.DataFrame,
     exported_logs: pd.DataFrame,
 ) -> pd.Series:
+    info = calcular_info_log_asignador(asignador, exported_logs)
+    return info["LLEGADA"]
+
+
+def calcular_info_log_asignador(
+    asignador: pd.DataFrame,
+    exported_logs: pd.DataFrame,
+) -> pd.DataFrame:
     qrs = set(asignador["QR"].dropna().astype(str).str.strip())
     logs = exported_logs[
         ["request_code", "initial_state", "final_state", "date_created"]
@@ -472,23 +507,38 @@ def calcular_llegadas_desde_logs(
         for qr, eventos in logs.groupby("request_code", sort=False)
     }
     llegadas: dict[tuple[str, str], pd.Timestamp] = {}
+    posibles_pnc: dict[tuple[str, str], bool] = {}
     for qr, flujo in asignador[["QR", "FLUJO"]].drop_duplicates().itertuples(
         index=False, name=None
     ):
         eventos = eventos_por_qr.get(qr)
-        llegadas[(qr, flujo)] = (
-            _resolver_llegada_actual(eventos, flujo)
+        llegada, posible_pnc = (
+            _resolver_ciclo_actual_desde_log(eventos, flujo)
             if eventos is not None
-            else pd.NaT
+            else (pd.NaT, False)
         )
+        llegadas[(qr, flujo)] = llegada
+        posibles_pnc[(qr, flujo)] = posible_pnc
 
-    valores = [
+    fechas = [
         llegadas.get((qr, flujo), pd.NaT)
         for qr, flujo in asignador[["QR", "FLUJO"]].itertuples(
             index=False, name=None
         )
     ]
-    return pd.Series(pd.to_datetime(valores, errors="coerce"), index=asignador.index)
+    marcas_pnc = [
+        "Si" if posibles_pnc.get((qr, flujo), False) else ""
+        for qr, flujo in asignador[["QR", "FLUJO"]].itertuples(
+            index=False, name=None
+        )
+    ]
+    return pd.DataFrame(
+        {
+            "LLEGADA": pd.to_datetime(fechas, errors="coerce"),
+            "POSIBLE_PNC": marcas_pnc,
+        },
+        index=asignador.index,
+    )
 
 
 def construir_asignador(
@@ -574,11 +624,14 @@ def construir_asignador(
 
     if exported_logs is None:
         asignador["LLEGADA"] = pd.Timestamp(fecha_carga or fecha_actual_colombia())
+        asignador["POSIBLE_PNC"] = ""
     else:
-        asignador["LLEGADA"] = calcular_llegadas_desde_logs(
+        info_log = calcular_info_log_asignador(
             asignador,
             exported_logs,
         )
+        asignador["LLEGADA"] = info_log["LLEGADA"]
+        asignador["POSIBLE_PNC"] = info_log["POSIBLE_PNC"]
 
     return asignador[COLUMNAS_ASIGNADOR].reset_index(drop=True)
 
@@ -586,6 +639,8 @@ def construir_asignador(
 def construir_resumen(asignador: pd.DataFrame) -> dict[str, pd.DataFrame]:
     datos = asignador.copy()
     datos["USER_RESUMEN"] = datos["USER"].fillna("").replace("", "Sin asignar")
+    if "POSIBLE_PNC" not in datos.columns:
+        datos["POSIBLE_PNC"] = ""
 
     casos_flujo = (
         datos.groupby(["FLUJO", "ESTADO"], dropna=False)["QR"]
@@ -617,11 +672,21 @@ def construir_resumen(asignador: pd.DataFrame) -> dict[str, pd.DataFrame]:
         .sort_values(["USER", "ESTADO"])
         .reset_index(drop=True)
     )
+    posibles_pnc = (
+        datos.loc[datos["POSIBLE_PNC"].eq("Si")]
+        .groupby(["FLUJO", "ORIGEN", "USER_RESUMEN"], dropna=False)["QR"]
+        .count()
+        .reset_index(name="POSIBLES_PNC")
+        .rename(columns={"USER_RESUMEN": "USER"})
+        .sort_values(["FLUJO", "ORIGEN", "USER"])
+        .reset_index(drop=True)
+    )
     return {
         "casos_por_flujo": casos_flujo,
         "casos_por_origen": casos_origen,
         "casos_por_user": casos_user,
         "elementos_por_user": elementos_user,
+        "posibles_pnc": posibles_pnc,
     }
 
 
@@ -796,6 +861,7 @@ def exportar_excel(
         ("Casos por origen", resumenes["casos_por_origen"]),
         ("Casos por USER", resumenes["casos_por_user"]),
         ("Elementos por USER", resumenes["elementos_por_user"]),
+        ("Posibles PNC", resumenes["posibles_pnc"]),
     ]
     for titulo, tabla in tablas:
         hoja_resumen.append(
