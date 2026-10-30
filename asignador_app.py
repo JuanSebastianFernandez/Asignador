@@ -3,6 +3,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
+import shutil
+import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -24,7 +27,26 @@ from asignador_core import (
 )
 
 
-RUTA_PROFESIONALES = Path(__file__).with_name("profesionales.csv")
+def _ruta_profesionales() -> Path:
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).with_name("profesionales.csv")
+
+    directorio_datos = Path(
+        os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+    ) / "Asignador"
+    directorio_datos.mkdir(parents=True, exist_ok=True)
+    ruta = directorio_datos / "profesionales.csv"
+
+    if not ruta.exists():
+        directorio_recursos = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+        plantilla = directorio_recursos / "profesionales.csv"
+        if plantilla.exists():
+            shutil.copyfile(plantilla, ruta)
+
+    return ruta
+
+
+RUTA_PROFESIONALES = _ruta_profesionales()
 GITHUB_API = "https://api.github.com"
 
 
@@ -131,7 +153,7 @@ st.set_page_config(
 
 st.title("Asignador de casos")
 st.caption(
-    "Carga las tres fuentes obligatorias y, opcionalmente, los logs; administra "
+    "Carga las cuatro fuentes obligatorias y, opcionalmente, los logs; administra "
     "los profesionales y genera el Excel con trazabilidad completa."
 )
 
@@ -297,7 +319,7 @@ with tab_profesionales:
 with tab_carga:
     st.subheader("1. Carga de archivos")
     archivos_cargados = st.file_uploader(
-        "Seleccione los tres archivos obligatorios y, si lo tiene, el archivo de logs",
+        "Seleccione los cuatro archivos obligatorios y, si lo tiene, el archivo de logs",
         type=["csv"],
         accept_multiple_files=True,
         help=(
@@ -307,7 +329,7 @@ with tab_carga:
     )
 
     encontrados, duplicados, no_reconocidos = identificar_archivos(archivos_cargados)
-    columnas_estado = st.columns(4)
+    columnas_estado = st.columns(len(TIPOS_ARCHIVO))
     for columna, (tipo, patron) in zip(columnas_estado, TIPOS_ARCHIVO.items()):
         with columna:
             if tipo in encontrados:

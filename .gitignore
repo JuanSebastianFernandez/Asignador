@@ -27,6 +27,11 @@ Casos_asigna_generado*.xlsx
 *.tmp
 *.log
 
+# Installer build output
+build/
+dist/
+installer/output/
+
 # IDE and operating system
 .vscode/
 .idea/

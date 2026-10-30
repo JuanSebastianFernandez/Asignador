@@ -4,6 +4,13 @@ Aplicación local en Streamlit para consolidar los archivos de casos, administra
 profesionales y generar un Excel con la hoja `Asignador`, resúmenes y fuentes
 Raw.
 
+La aplicación clasifica casos de `Flujo viejo`, `Flujo nuevo` y `Flujo 2.0`.
+El Flujo 2.0 se identifica en `exported-request` cuando
+`new_fulfillment_process` es `True` y `base_order` está vacío. Solo ingresan al
+Asignador los casos que se encuentran en estado `2.5` o `2.6`.
+Los casos `2.5` quedan sin usuario. Para los casos `2.6`, el dibujante se obtiene
+del último comentario `Drawing Assignment` o `Drawing Reassignment` del log.
+
 ## Instalación
 
 ```powershell
@@ -56,3 +63,27 @@ Si antes del reingreso aparece una devolución (`2`, `2.6.1` o
 corta el ciclo anterior.
 
 La configuración local permite cargar archivos de hasta 500 MB.
+
+## Instalador para Windows
+
+El proyecto incluye una compilación para Windows que no requiere Python en el
+equipo de destino. Para crearla:
+
+1. Instale Inno Setup 6 una sola vez:
+
+   ```powershell
+   winget install JRSoftware.InnoSetup
+   ```
+
+2. Desde la raíz del proyecto ejecute:
+
+   ```powershell
+   .\build_installer.ps1
+   ```
+
+El instalador se genera en
+`installer\output\AsignadorCasos-Setup.exe`. Ese es el único archivo que debe
+entregarse al usuario final. Al instalarlo se crea un acceso en el menú Inicio y
+se ofrece crear otro en el escritorio. La app se abre en el navegador y conserva
+su tabla de profesionales en `%LOCALAPPDATA%\Asignador\profesionales.csv`, por
+lo que una actualización o reinstalación no borra los cambios del usuario.

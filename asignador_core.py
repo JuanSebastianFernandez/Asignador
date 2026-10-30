@@ -21,12 +21,14 @@ TIPOS_ARCHIVO = {
     "grouped_node_report": "grouped-node-report",
     "exported_request_DW": "exported-request_dw",
     "exported_drawing": "exported-drawing",
+    "exported_request_20": "exported-request",
 }
 
 ARCHIVOS_OBLIGATORIOS = {
     "grouped_node_report",
     "exported_request_DW",
     "exported_drawing",
+    "exported_request_20",
 }
 
 COLUMNAS_REQUERIDAS = {
@@ -42,12 +44,21 @@ COLUMNAS_REQUERIDAS = {
         "process.subprocess",
         "assigned_draftsman",
     },
+    "exported_request_20": {
+        "request_code",
+        "status",
+        "process__subprocess",
+        "user_assigned_last_name",
+        "new_fulfillment_process",
+        "base_order",
+    },
     "grouped_node_report": {"request_code"},
     "exported_logs": {
         "request_code",
         "initial_state",
         "final_state",
         "date_created",
+        "comments",
     },
 }
 
@@ -126,7 +137,7 @@ PROFESIONALES_INICIALES = [
 ]
 
 MAX_FILAS_DATOS_EXCEL = 1_048_575
-VERSION_LOGICA_PROCESAMIENTO = "pnc-v2-devolucion-corta-ciclo"
+VERSION_LOGICA_PROCESAMIENTO = "flujo-20-v2-user-desde-log-pnc-v2"
 
 REGLAS_LLEGADA = {
     "Flujo viejo": {
@@ -139,6 +150,11 @@ REGLAS_LLEGADA = {
         "devoluciones": {"verify_formats"},
         "entregas": {"drawing_review"},
     },
+    "Flujo 2.0": {
+        "activos": {"2.5", "2.6"},
+        "devoluciones": {"2", "2.6.1"},
+        "entregas": {"2.7"},
+    },
 }
 
 ESTADOS_SEGUIDOS_LLEGADA = {
@@ -148,6 +164,10 @@ ESTADOS_SEGUIDOS_LLEGADA = {
 }
 
 RE_CODIGO_ESTADO = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)*)")
+RE_ASIGNACION_DIBUJO = re.compile(
+    r"^\s*Drawing\s+(?:Re)?Assignment\s*:\s*(.*?)\s*$",
+    flags=re.IGNORECASE,
+)
 
 
 class ErrorDatos(ValueError):
@@ -291,6 +311,22 @@ def formatear_nombre_flujo_viejo(valor: object) -> str:
     return f"{nombres} {apellidos}".title()
 
 
+def extraer_usuario_asignacion_log(valor: object) -> str:
+    texto = "" if valor is None else re.sub(r"\s+", " ", str(valor)).strip()
+    coincidencia = RE_ASIGNACION_DIBUJO.match(texto)
+    if not coincidencia:
+        return ""
+
+    detalle = coincidencia.group(1).strip()
+    partes = re.split(r"\s*(?:→|->|⇒)\s*", detalle)
+    nombre = partes[-1].strip(" ,.-") if partes else ""
+    if not nombre or nombre.casefold() in {"nan", "none", "null"}:
+        return ""
+    if "," in nombre:
+        return formatear_nombre_flujo_viejo(nombre)
+    return nombre.title()
+
+
 def limpiar_cedula(valor: object) -> str:
     if valor is None or pd.isna(valor):
         return ""
@@ -301,8 +337,20 @@ def limpiar_cedula(valor: object) -> str:
 
 
 def es_estado_flujo_viejo(valor: object) -> bool:
-    texto = "" if valor is None else str(valor).strip()
-    return bool(re.match(r"^2\.(?:5|6)(?:\D|$)", texto))
+    return extraer_codigo_estado(valor) in {"2.5", "2.6"}
+
+
+def es_registro_flujo_20(df: pd.DataFrame) -> pd.Series:
+    nuevo_cumplimiento = (
+        df["new_fulfillment_process"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+        .eq("true")
+    )
+    sin_orden_base = df["base_order"].fillna("").astype(str).str.strip().eq("")
+    return nuevo_cumplimiento & sin_orden_base
 
 
 def normalizar_estado_flujo_nuevo(valor: object) -> str:
@@ -484,7 +532,7 @@ def calcular_info_log_asignador(
 ) -> pd.DataFrame:
     qrs = set(asignador["QR"].dropna().astype(str).str.strip())
     logs = exported_logs[
-        ["request_code", "initial_state", "final_state", "date_created"]
+        ["request_code", "initial_state", "final_state", "date_created", "comments"]
     ].copy()
     logs["_row_order"] = range(len(logs))
     logs["request_code"] = logs["request_code"].astype(str).str.strip()
@@ -508,6 +556,7 @@ def calcular_info_log_asignador(
     }
     llegadas: dict[tuple[str, str], pd.Timestamp] = {}
     posibles_pnc: dict[tuple[str, str], bool] = {}
+    usuarios_log: dict[tuple[str, str], str] = {}
     for qr, flujo in asignador[["QR", "FLUJO"]].drop_duplicates().itertuples(
         index=False, name=None
     ):
@@ -519,6 +568,16 @@ def calcular_info_log_asignador(
         )
         llegadas[(qr, flujo)] = llegada
         posibles_pnc[(qr, flujo)] = posible_pnc
+        usuario_log = ""
+        if flujo == "Flujo 2.0" and eventos is not None:
+            asignaciones = eventos.loc[
+                eventos["final_state_code"].eq("2.6")
+            ].sort_values(["timestamp", "_row_order"], kind="stable")
+            usuarios = asignaciones["comments"].map(extraer_usuario_asignacion_log)
+            usuarios = usuarios.loc[usuarios.ne("")]
+            if not usuarios.empty:
+                usuario_log = usuarios.iloc[-1]
+        usuarios_log[(qr, flujo)] = usuario_log
 
     fechas = [
         llegadas.get((qr, flujo), pd.NaT)
@@ -532,10 +591,17 @@ def calcular_info_log_asignador(
             index=False, name=None
         )
     ]
+    usuarios = [
+        usuarios_log.get((qr, flujo), "")
+        for qr, flujo in asignador[["QR", "FLUJO"]].itertuples(
+            index=False, name=None
+        )
+    ]
     return pd.DataFrame(
         {
             "LLEGADA": pd.to_datetime(fechas, errors="coerce"),
             "POSIBLE_PNC": marcas_pnc,
+            "USER_LOG": usuarios,
         },
         index=asignador.index,
     )
@@ -544,6 +610,7 @@ def calcular_info_log_asignador(
 def construir_asignador(
     exported_request_dw: pd.DataFrame,
     exported_drawing: pd.DataFrame,
+    exported_request_20: pd.DataFrame,
     grouped_node_report: pd.DataFrame,
     exported_logs: pd.DataFrame | None,
     profesionales: pd.DataFrame,
@@ -560,6 +627,11 @@ def construir_asignador(
         "exported-drawing",
     )
     validar_columnas(
+        exported_request_20,
+        COLUMNAS_REQUERIDAS["exported_request_20"],
+        "exported-request",
+    )
+    validar_columnas(
         grouped_node_report,
         COLUMNAS_REQUERIDAS["grouped_node_report"],
         "grouped-node-report",
@@ -574,11 +646,28 @@ def construir_asignador(
     profesionales = normalizar_profesionales(profesionales)
     estados_viejos = exported_request_dw["status"].fillna("").astype(str).str.strip()
     estados_nuevos = exported_drawing["status"].map(normalizar_estado_flujo_nuevo)
+    estados_20 = exported_request_20["status"].fillna("").astype(str).str.strip()
+
+    registros_20 = es_registro_flujo_20(exported_request_20)
+    qrs_20 = set(
+        exported_request_20.loc[registros_20, "request_code"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    qrs_20.discard("")
 
     viejos = exported_request_dw.loc[
         exported_request_dw["status"].map(es_estado_flujo_viejo)
+        & ~exported_request_dw["request_code"].fillna("").astype(str).str.strip().isin(qrs_20)
     ].copy()
-    nuevos = exported_drawing.loc[estados_nuevos.ne("")].copy()
+    nuevos = exported_drawing.loc[
+        estados_nuevos.ne("")
+        & ~exported_drawing["request_code"].fillna("").astype(str).str.strip().isin(qrs_20)
+    ].copy()
+    flujo_20 = exported_request_20.loc[
+        registros_20 & exported_request_20["status"].map(es_estado_flujo_viejo)
+    ].copy()
 
     asignador_viejo = pd.DataFrame(
         {
@@ -609,7 +698,20 @@ def construir_asignador(
         }
     )
 
-    asignador = pd.concat([asignador_viejo, asignador_nuevo], ignore_index=True)
+    asignador_20 = pd.DataFrame(
+        {
+            "QR": flujo_20["request_code"].astype(str).str.strip(),
+            "FLUJO": "Flujo 2.0",
+            "ORIGEN": flujo_20["process__subprocess"].map(normalizar_origen),
+            "ESTADO": estados_20.loc[flujo_20.index],
+            "USER": "",
+        }
+    )
+
+    asignador = pd.concat(
+        [asignador_viejo, asignador_nuevo, asignador_20],
+        ignore_index=True,
+    )
     asignador = asignador.loc[asignador["QR"].ne("")].copy()
 
     conteo_elementos = (
@@ -632,6 +734,12 @@ def construir_asignador(
         )
         asignador["LLEGADA"] = info_log["LLEGADA"]
         asignador["POSIBLE_PNC"] = info_log["POSIBLE_PNC"]
+        es_flujo_20_asignado = asignador["FLUJO"].eq("Flujo 2.0") & asignador[
+            "ESTADO"
+        ].map(extraer_codigo_estado).eq("2.6")
+        asignador.loc[es_flujo_20_asignado, "USER"] = info_log.loc[
+            es_flujo_20_asignado, "USER_LOG"
+        ]
 
     return asignador[COLUMNAS_ASIGNADOR].reset_index(drop=True)
 
@@ -896,6 +1004,7 @@ def exportar_excel(
         "grouped_node_report": "Raw_grouped_node_report",
         "exported_request_DW": "Raw_exported_request_DW",
         "exported_drawing": "Raw_exported_drawing",
+        "exported_request_20": "Raw_exported_request_20",
     }
     for tipo, nombre_hoja in nombres_raw.items():
         if tipo not in raw_data:
@@ -936,6 +1045,7 @@ def procesar_archivos(
     asignador = construir_asignador(
         raw_data["exported_request_DW"],
         raw_data["exported_drawing"],
+        raw_data["exported_request_20"],
         raw_data["grouped_node_report"],
         raw_data.get("exported_logs"),
         profesionales,
@@ -950,6 +1060,7 @@ def procesar_archivos(
                 "initial_state",
                 "final_state",
                 "date_created",
+                "comments",
             ]
         ),
     )
