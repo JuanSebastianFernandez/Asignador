@@ -153,12 +153,17 @@ st.set_page_config(
 
 st.title("Asignador de casos")
 st.caption(
-    "Carga las cuatro fuentes obligatorias y, opcionalmente, los logs; administra "
-    "los profesionales y genera el Excel con trazabilidad completa."
+    "Carga las fuentes de PMS, administra los profesionales y genera el Excel. "
+    "Los logs y el Plan de trabajo ODMs son opcionales."
 )
 
-if st.session_state.get("version_logica_procesamiento") != VERSION_LOGICA_PROCESAMIENTO:
+
+def descartar_resultado_asignador() -> None:
     st.session_state.pop("resultado_asignador", None)
+
+
+if st.session_state.get("version_logica_procesamiento") != VERSION_LOGICA_PROCESAMIENTO:
+    descartar_resultado_asignador()
     st.session_state["version_logica_procesamiento"] = VERSION_LOGICA_PROCESAMIENTO
 
 
@@ -322,6 +327,7 @@ with tab_carga:
         "Seleccione los cuatro archivos obligatorios y, si lo tiene, el archivo de logs",
         type=["csv"],
         accept_multiple_files=True,
+        on_change=descartar_resultado_asignador,
         help=(
             "La identificación usa la parte fija del nombre; la fecha o número "
             "inicial puede cambiar."
@@ -350,6 +356,13 @@ with tab_carga:
     if no_reconocidos:
         st.warning("Archivos no reconocidos: " + ", ".join(no_reconocidos))
 
+    plan_odms = st.file_uploader(
+        "Plan de trabajo ODMs (opcional)",
+        type=["xlsx"],
+        on_change=descartar_resultado_asignador,
+        help="Suba el Excel con QR en A, ODM en B y AGP en C.",
+    )
+
     st.subheader("2. Generar Asignador")
     puede_generar = (
         ARCHIVOS_OBLIGATORIOS.issubset(encontrados) and not duplicados
@@ -363,9 +376,9 @@ with tab_carga:
         try:
             profesionales, _, _ = obtener_profesionales()
             with st.status("Procesando archivos...", expanded=True) as estado:
-                st.write("Leyendo y validando los CSV.")
+                st.write("Leyendo y validando los archivos cargados.")
                 asignador, resumenes, raw_data = procesar_archivos(
-                    encontrados, profesionales
+                    encontrados, profesionales, plan_odms=plan_odms
                 )
                 st.write("Construyendo resúmenes y hojas Raw.")
                 excel = exportar_excel(
@@ -399,6 +412,16 @@ with tab_carga:
             "Elementos", f"{total_elementos:,}".replace(",", ".")
         )
         metrica_4.metric("Posibles PNC", f"{posibles_pnc:,}".replace(",", "."))
+
+        if "AGP" in asignador:
+            casos_con_agp = asignador.loc[asignador["AGP"].ne(""), ["QR", "AGP"]]
+            casos_con_agp = casos_con_agp.drop_duplicates()
+            if casos_con_agp.empty:
+                st.info("El plan no contiene AGP para los QR elegibles de la bandeja.")
+            else:
+                total_con_agp = casos_con_agp["QR"].nunique()
+                st.success(f"QR de la bandeja con AGP registrado: {total_con_agp}.")
+                st.dataframe(casos_con_agp, hide_index=True, use_container_width=True)
 
         st.subheader("Vista previa de Asignador")
         st.dataframe(asignador, hide_index=True, use_container_width=True)

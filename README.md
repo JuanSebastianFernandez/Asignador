@@ -11,6 +11,14 @@ Asignador los casos que se encuentran en estado `2.5` o `2.6`.
 Los casos `2.5` quedan sin usuario. Para los casos `2.6`, el dibujante se obtiene
 del último comentario `Drawing Assignment` o `Drawing Reassignment` del log.
 
+## Plan de trabajo ODMs
+
+El coordinador puede cargar el plan `.xlsx` de forma opcional. La primera hoja
+debe tener `QR` en A, `ODM` (u `ODM VALORIZADA`) en B y `AGP` en C. El Asignador
+cruza por QR los casos de `Flujo nuevo` y `Flujo 2.0` presentes en la bandeja y
+muestra el AGP registrado en la vista previa y el Excel. Si un QR tiene varios
+AGP distintos, aparecen juntos en la misma celda. Los QR sin AGP quedan vacíos.
+
 ## Instalación
 
 ```powershell

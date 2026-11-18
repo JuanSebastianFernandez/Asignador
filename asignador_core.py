@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import csv
 import io
 import re
@@ -137,7 +138,7 @@ PROFESIONALES_INICIALES = [
 ]
 
 MAX_FILAS_DATOS_EXCEL = 1_048_575
-VERSION_LOGICA_PROCESAMIENTO = "flujo-20-v2-user-desde-log-pnc-v2"
+VERSION_LOGICA_PROCESAMIENTO = "plan-odms-v1"
 
 REGLAS_LLEGADA = {
     "Flujo viejo": {
@@ -231,7 +232,10 @@ def _detectar_codificacion(contenido: bytes) -> tuple[str, str]:
     muestra = contenido[:200_000]
     for codificacion in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
         try:
-            return codificacion, muestra.decode(codificacion)
+            decodificador = codecs.getincrementaldecoder(codificacion)()
+            return codificacion, decodificador.decode(
+                muestra, final=len(muestra) == len(contenido)
+            )
         except UnicodeDecodeError:
             continue
     return "latin1", muestra.decode("latin1")
@@ -269,6 +273,40 @@ def leer_csv(archivo: object) -> pd.DataFrame:
 
     df.columns = [str(columna).strip().lstrip("\ufeff") for columna in df.columns]
     return df
+
+
+def leer_plan_odms(archivo: object) -> pd.Series:
+    nombre = _nombre_archivo(archivo)
+    try:
+        plan = pd.read_excel(
+            io.BytesIO(_obtener_bytes(archivo)),
+            engine="openpyxl",
+            dtype=str,
+            keep_default_na=False,
+        )
+    except Exception as exc:
+        raise ErrorDatos(f"No se pudo leer {nombre} como un Excel .xlsx.") from exc
+
+    columnas = [str(columna).strip().upper() for columna in plan.columns]
+    if (
+        len(columnas) != 3
+        or columnas[0] != "QR"
+        or columnas[1] not in {"ODM", "ODM VALORIZADA"}
+        or columnas[2] != "AGP"
+    ):
+        raise ErrorDatos(
+            f"El plan {nombre} debe tener QR en A, ODM (u ODM VALORIZADA) en B "
+            "y AGP en C, en la primera hoja."
+        )
+
+    datos = pd.DataFrame(
+        {
+            "QR": plan.iloc[:, 0].str.strip().str.upper(),
+            "AGP": plan.iloc[:, 2].str.strip(),
+        }
+    )
+    datos = datos.loc[datos["QR"].ne("") & datos["AGP"].ne("")].drop_duplicates()
+    return datos.groupby("QR", sort=False)["AGP"].agg(" / ".join)
 
 
 def validar_columnas(
@@ -658,7 +696,7 @@ def construir_asignador(
     qrs_20.discard("")
 
     viejos = exported_request_dw.loc[
-        exported_request_dw["status"].map(es_estado_flujo_viejo)
+        exported_request_dw["status"].map(es_estado_flujo_viejo).astype(bool)
         & ~exported_request_dw["request_code"].fillna("").astype(str).str.strip().isin(qrs_20)
     ].copy()
     nuevos = exported_drawing.loc[
@@ -666,7 +704,7 @@ def construir_asignador(
         & ~exported_drawing["request_code"].fillna("").astype(str).str.strip().isin(qrs_20)
     ].copy()
     flujo_20 = exported_request_20.loc[
-        registros_20 & exported_request_20["status"].map(es_estado_flujo_viejo)
+        registros_20 & exported_request_20["status"].map(es_estado_flujo_viejo).astype(bool)
     ].copy()
 
     asignador_viejo = pd.DataFrame(
@@ -949,6 +987,7 @@ def exportar_excel(
 
     hoja_asignador = workbook.create_sheet("Asignador")
     _configurar_hoja(hoja_asignador)
+    _ajustar_anchos(hoja_asignador, asignador)
     _escribir_dataframe(
         hoja_asignador,
         asignador,
@@ -959,7 +998,6 @@ def exportar_excel(
         f"A1:{get_column_letter(len(asignador.columns))}{len(asignador) + 1}"
     )
     hoja_asignador.row_dimensions[1].height = 24
-    _ajustar_anchos(hoja_asignador, asignador)
 
     hoja_resumen = workbook.create_sheet("Resumen")
     _configurar_hoja(hoja_resumen, congelar="A1")
@@ -1018,6 +1056,8 @@ def exportar_excel(
 def procesar_archivos(
     archivos_identificados: Mapping[str, object],
     profesionales: pd.DataFrame,
+    *,
+    plan_odms: object | None = None,
 ) -> tuple[
     pd.DataFrame,
     dict[str, pd.DataFrame],
@@ -1030,6 +1070,7 @@ def procesar_archivos(
         etiquetas = [TIPOS_ARCHIVO[tipo] for tipo in faltantes]
         raise ErrorDatos("Faltan archivos requeridos: " + ", ".join(etiquetas))
 
+    agp_por_qr = leer_plan_odms(plan_odms) if plan_odms is not None else None
     raw_data = {
         tipo: leer_csv(archivo)
         for tipo, archivo in archivos_identificados.items()
@@ -1051,6 +1092,11 @@ def procesar_archivos(
         profesionales,
         fecha_carga=fecha_actual_colombia(),
     )
+    if agp_por_qr is not None:
+        flujo_elegible = asignador["FLUJO"].isin({"Flujo nuevo", "Flujo 2.0"})
+        agp = asignador["QR"].str.upper().map(agp_por_qr)
+        asignador["AGP"] = agp.where(flujo_elegible).fillna("")
+
     resumenes = construir_resumen(asignador)
     raw_data.setdefault(
         "exported_logs",
