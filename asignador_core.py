@@ -63,6 +63,12 @@ COLUMNAS_REQUERIDAS = {
     },
 }
 
+COLUMNAS_DATOS_PASO_20 = {
+    "odm": "ODM",
+    "agp_project": "AGP_PROJECT",
+    "protocol": "PROTOCOLO",
+}
+
 COLUMNAS_ASIGNADOR = [
     "QR",
     "FLUJO",
@@ -72,6 +78,8 @@ COLUMNAS_ASIGNADOR = [
     "LLEGADA",
     "USER",
     "POSIBLE_PNC",
+    "PASO_POR_FLUJO_2_0",
+    *COLUMNAS_DATOS_PASO_20.values(),
 ]
 
 PROFESIONALES_INICIALES = [
@@ -138,7 +146,7 @@ PROFESIONALES_INICIALES = [
 ]
 
 MAX_FILAS_DATOS_EXCEL = 1_048_575
-VERSION_LOGICA_PROCESAMIENTO = "plan-odms-v1"
+VERSION_LOGICA_PROCESAMIENTO = "paso-flujo-20-a-flujo-nuevo-v1"
 
 REGLAS_LLEGADA = {
     "Flujo viejo": {
@@ -378,17 +386,44 @@ def es_estado_flujo_viejo(valor: object) -> bool:
     return extraer_codigo_estado(valor) in {"2.5", "2.6"}
 
 
+def _es_true(serie: pd.Series) -> pd.Series:
+    return serie.fillna("").astype(str).str.strip().str.casefold().eq("true")
+
+
 def es_registro_flujo_20(df: pd.DataFrame) -> pd.Series:
-    nuevo_cumplimiento = (
-        df["new_fulfillment_process"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.casefold()
-        .eq("true")
-    )
     sin_orden_base = df["base_order"].fillna("").astype(str).str.strip().eq("")
-    return nuevo_cumplimiento & sin_orden_base
+    return _es_true(df["new_fulfillment_process"]) & sin_orden_base
+
+
+def _datos_paso_flujo_20(
+    solicitudes: pd.DataFrame, qrs_en_dibujo: pd.Series
+) -> pd.DataFrame:
+    if "contract_drawing_completed" not in solicitudes:
+        return pd.DataFrame(columns=list(COLUMNAS_DATOS_PASO_20.values()))
+
+    validar_columnas(solicitudes, COLUMNAS_DATOS_PASO_20, "exported-request")
+    completados = _es_true(solicitudes["new_fulfillment_process"]) & _es_true(
+        solicitudes["contract_drawing_completed"]
+    )
+    datos = solicitudes.loc[
+        completados, ["request_code", *COLUMNAS_DATOS_PASO_20]
+    ].fillna("").astype(str)
+    datos = datos.apply(lambda columna: columna.str.strip())
+    datos["request_code"] = datos["request_code"].str.upper()
+    datos = datos.loc[
+        datos["request_code"].ne("") & datos["request_code"].isin(qrs_en_dibujo)
+    ].drop_duplicates()
+
+    conflictos = datos.loc[datos["request_code"].duplicated(), "request_code"].unique()
+    if len(conflictos):
+        muestra = ", ".join(conflictos[:5])
+        raise ErrorDatos(
+            f"El archivo exported-request contiene valores distintos de ODM, AGP "
+            f"Project o protocolo para {len(conflictos)} QR de la bandeja. "
+            f"Revise estos QR: {muestra}."
+        )
+
+    return datos.set_index("request_code").rename(columns=COLUMNAS_DATOS_PASO_20)
 
 
 def normalizar_estado_flujo_nuevo(valor: object) -> str:
@@ -687,24 +722,34 @@ def construir_asignador(
     estados_20 = exported_request_20["status"].fillna("").astype(str).str.strip()
 
     registros_20 = es_registro_flujo_20(exported_request_20)
-    qrs_20 = set(
-        exported_request_20.loc[registros_20, "request_code"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
+    qrs_request = (
+        exported_request_20["request_code"].fillna("").astype(str).str.strip().str.upper()
     )
-    qrs_20.discard("")
+    qrs_20 = qrs_request.loc[registros_20 & qrs_request.ne("")]
+    qrs_drawing = (
+        exported_drawing["request_code"].fillna("").astype(str).str.strip().str.upper()
+    )
+    en_bandeja_nueva = estados_nuevos.ne("")
+    datos_paso_20 = _datos_paso_flujo_20(
+        exported_request_20, qrs_drawing.loc[en_bandeja_nueva]
+    )
+    qrs_paso_20 = datos_paso_20.index
+    qrs_viejos = (
+        exported_request_dw["request_code"].fillna("").astype(str).str.strip().str.upper()
+    )
 
     viejos = exported_request_dw.loc[
         exported_request_dw["status"].map(es_estado_flujo_viejo).astype(bool)
-        & ~exported_request_dw["request_code"].fillna("").astype(str).str.strip().isin(qrs_20)
+        & ~qrs_viejos.isin(qrs_20)
+        & ~qrs_viejos.isin(qrs_paso_20)
     ].copy()
     nuevos = exported_drawing.loc[
-        estados_nuevos.ne("")
-        & ~exported_drawing["request_code"].fillna("").astype(str).str.strip().isin(qrs_20)
+        en_bandeja_nueva & (~qrs_drawing.isin(qrs_20) | qrs_drawing.isin(qrs_paso_20))
     ].copy()
     flujo_20 = exported_request_20.loc[
-        registros_20 & exported_request_20["status"].map(es_estado_flujo_viejo).astype(bool)
+        registros_20
+        & exported_request_20["status"].map(es_estado_flujo_viejo).astype(bool)
+        & ~qrs_request.isin(qrs_paso_20)
     ].copy()
 
     asignador_viejo = pd.DataFrame(
@@ -751,6 +796,15 @@ def construir_asignador(
         ignore_index=True,
     )
     asignador = asignador.loc[asignador["QR"].ne("")].copy()
+
+    claves = asignador["QR"].str.upper()
+    paso_por_20 = asignador["FLUJO"].eq("Flujo nuevo") & claves.isin(qrs_paso_20)
+    asignador["PASO_POR_FLUJO_2_0"] = ""
+    asignador.loc[paso_por_20, "PASO_POR_FLUJO_2_0"] = "Si"
+    for columna in COLUMNAS_DATOS_PASO_20.values():
+        asignador[columna] = (
+            claves.where(paso_por_20).map(datos_paso_20[columna]).fillna("")
+        )
 
     conteo_elementos = (
         grouped_node_report["request_code"]

@@ -33,6 +33,53 @@ def _fuentes_vacias() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
 
 class Flujo20Tests(unittest.TestCase):
+    def test_cruza_el_paso_por_20_solo_en_la_bandeja_del_flujo_nuevo(self) -> None:
+        viejo, nuevo, nodos = _fuentes_vacias()
+        viejo.loc[0] = ["QR-ORDEN", "2.6", "Proyectos", "Anterior, Usuario"]
+        nuevo.loc[0] = ["QR-PASO", "assigned_draftsman", "PQRs", "CO123"]
+        nuevo.loc[1] = ["QR-ORDEN", "drawing_request", "PQRs", ""]
+        nuevo.loc[2] = ["QR-PENDIENTE", "drawing_request", "PQRs", ""]
+        nuevo.loc[3] = ["QR-COMUN", "drawing_request", "PQRs", ""]
+        nuevo.loc[4] = ["QR-FUERA", "drawing_review", "PQRs", ""]
+        request = pd.DataFrame(
+            [
+                [" qr-paso ", "2.6", "True", " TRUE ", "", "0001", "0002", "0003"],
+                ["QR-ORDEN", "5", "True", "True", "base", "0041", "0042", "0043"],
+                ["QR-PENDIENTE", "2.5", "True", "False", "", "11", "12", "13"],
+                ["QR-COMUN", "5", "False", "True", "", "21", "22", "23"],
+                ["QR-FUERA", "5", "True", "True", "", "31", "32", "33"],
+            ],
+            columns=[
+                "request_code", "status", "new_fulfillment_process",
+                "contract_drawing_completed", "base_order", "odm", "agp_project", "protocol",
+            ],
+        ).assign(process__subprocess="Proyectos", user_assigned_last_name="Anterior, Usuario")
+        logs = pd.DataFrame(
+            [["QR-PASO", "drawing_review", "assigned_draftsman", "2026-11-18 09:00", ""]],
+            columns=["request_code", "initial_state", "final_state", "date_created", "comments"],
+        )
+        profesionales = pd.DataFrame(
+            [["123", "Dibujante vigente", ""]], columns=["CEDULA", "NOMBRE", "CORREO"]
+        )
+
+        resultado = construir_asignador(
+            viejo, nuevo, request, nodos, logs, profesionales
+        ).set_index("QR")
+
+        self.assertTrue(resultado.index.is_unique)
+        self.assertEqual(set(resultado.index), {"QR-PASO", "QR-ORDEN", "QR-PENDIENTE", "QR-COMUN"})
+        columnas = ["PASO_POR_FLUJO_2_0", "ODM", "AGP_PROJECT", "PROTOCOLO"]
+        self.assertEqual(resultado.loc["QR-PASO", columnas].tolist(), ["Si", "0001", "0002", "0003"])
+        self.assertEqual(resultado.loc["QR-ORDEN", columnas].tolist(), ["Si", "0041", "0042", "0043"])
+        self.assertEqual(resultado.loc["QR-PENDIENTE", columnas].tolist(), ["", "", "", ""])
+        self.assertEqual(resultado.loc["QR-COMUN", columnas].tolist(), ["", "", "", ""])
+        self.assertEqual(resultado.loc["QR-PENDIENTE", "FLUJO"], "Flujo 2.0")
+        self.assertEqual(resultado.loc["QR-ORDEN", "FLUJO"], "Flujo nuevo")
+        self.assertEqual(
+            resultado.loc["QR-PASO", ["FLUJO", "ESTADO", "USER", "POSIBLE_PNC"]].tolist(),
+            ["Flujo nuevo", "assigned_draftsman", "Dibujante vigente", "Si"],
+        )
+
     def test_identifica_exported_request_sin_confundir_request_dw(self) -> None:
         encontrados, duplicados, no_reconocidos = identificar_archivos(
             [

@@ -11,6 +11,12 @@ Asignador los casos que se encuentran en estado `2.5` o `2.6`.
 Los casos `2.5` quedan sin usuario. Para los casos `2.6`, el dibujante se obtiene
 del último comentario `Drawing Assignment` o `Drawing Reassignment` del log.
 
+Los casos en bandeja de `Flujo nuevo` se marcan en `PASO_POR_FLUJO_2_0` si su
+QR en `exported-request` tiene `new_fulfillment_process` y
+`contract_drawing_completed` en `True`. Se muestran `ODM`, `AGP_PROJECT` y
+`PROTOCOLO` del mismo registro. El caso conserva el estado y el responsable de
+`exported-drawing`.
+
 ## Plan de trabajo ODMs
 
 El coordinador puede cargar el plan `.xlsx` de forma opcional. La primera hoja

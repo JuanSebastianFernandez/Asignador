@@ -413,6 +413,14 @@ with tab_carga:
         )
         metrica_4.metric("Posibles PNC", f"{posibles_pnc:,}".replace(",", "."))
 
+        casos_paso_20 = asignador.loc[
+            asignador["PASO_POR_FLUJO_2_0"].eq("Si"),
+            ["QR", "ODM", "AGP_PROJECT", "PROTOCOLO"],
+        ].drop_duplicates()
+        if not casos_paso_20.empty:
+            st.subheader("Casos de Flujo nuevo que pasaron por 2.0")
+            st.dataframe(casos_paso_20, hide_index=True, use_container_width=True)
+
         if "AGP" in asignador:
             casos_con_agp = asignador.loc[asignador["AGP"].ne(""), ["QR", "AGP"]]
             casos_con_agp = casos_con_agp.drop_duplicates()

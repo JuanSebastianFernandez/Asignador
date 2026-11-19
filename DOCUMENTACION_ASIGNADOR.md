@@ -138,8 +138,11 @@ base_order = vacío
 ```
 
 Después de identificarlo, solo se incorpora si su estado actual es `2.5` o
-`2.6`. La clasificación de Flujo 2.0 tiene prioridad si el mismo QR aparece en
-otra fuente.
+`2.6`. Si el QR está en la bandeja de `exported-drawing` y su registro en
+`exported-request` tiene `new_fulfillment_process` y
+`contract_drawing_completed` en `True`, se incluye como `Flujo nuevo` con
+`PASO_POR_FLUJO_2_0 = Si`. El cruce trae `odm`, `agp_project` y `protocol` del
+mismo registro y funciona con cualquier valor de `base_order`.
 
 ## 5. Construcción de la hoja Asignador
 
@@ -148,13 +151,15 @@ La tabla final contiene las siguientes columnas:
 | Columna | Descripción |
 |---|---|
 | `QR` | Código único del caso |
-| `FLUJO` | `Flujo viejo` o `Flujo nuevo` |
+| `FLUJO` | `Flujo viejo`, `Flujo nuevo` o `Flujo 2.0` |
 | `ORIGEN` | Subproceso u origen del caso |
 | `ELEMENTOS` | Cantidad de elementos asociados al QR |
 | `ESTADO` | Estado actual de asignación |
 | `LLEGADA` | Fecha y hora de llegada del ciclo vigente |
 | `USER` | Profesional responsable |
 | `POSIBLE_PNC` | Marca `Si` cuando se detecta un posible PNC |
+| `PASO_POR_FLUJO_2_0` | Marca `Si` para casos en Flujo nuevo que ya completaron el dibujo en 2.0 |
+| `ODM`, `AGP_PROJECT`, `PROTOCOLO` | Identificadores de `exported-request` para esos casos |
 
 ### 5.1 QR y flujo
 
